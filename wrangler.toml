@@ -1,0 +1,27 @@
+name = "telegram-ai-bot"
+main = "src/worker.js"
+compatibility_date = "2026-11-01"
+
+# Workers AI (provedor gratuito padrão)
+[ai]
+binding = "AI"
+
+# Memória das conversas — crie com: npx wrangler kv namespace create HISTORY
+[[kv_namespaces]]
+binding = "HISTORY"
+id = "COLE_AQUI_O_ID_DO_KV"
+
+[vars]
+# "workers-ai" (grátis) ou "anthropic" (Claude, pago por uso)
+AI_PROVIDER = "workers-ai"
+WORKERS_AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+ANTHROPIC_MODEL = "claude-haiku-5-5"
+# IDs do Telegram separados por vírgula. Vazio = qualquer pessoa pode usar
+ALLOWED_USERS = ""
+MAX_HISTORY = "20"
+# SYSTEM_PROMPT = "Personalidade do assistente aqui (opcional)"
+
+# Segredos (NÃO coloque aqui — use wrangler secret put):
+#   TELEGRAM_BOT_TOKEN
+#   WEBHOOK_SECRET
+#   ANTHROPIC_API_KEY  (só se usar AI_PROVIDER = "anthropic")

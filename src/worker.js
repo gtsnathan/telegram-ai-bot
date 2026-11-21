@@ -34,6 +34,7 @@ export default {
         commands: [
           { command: "novo", description: "Começar uma conversa nova" },
           { command: "ajuda", description: "Como usar o assistente" },
+          { command: "voz", description: "Ligar/desligar respostas em áudio" },
           { command: "id", description: "Mostrar seu ID do Telegram" },
         ],
       });
@@ -56,11 +57,13 @@ export default {
 
 async function handleUpdate(update, env) {
   const msg = update.message;
-  if (!msg || !msg.text) return;
+  if (!msg || (!msg.text && !msg.voice && !msg.audio)) return;
 
   const chatId = msg.chat.id;
   const userId = msg.from?.id;
-  const text = msg.text.trim();
+  const audio = msg.voice || msg.audio;
+  let text = (msg.text || "").trim();
+  const isVoice = !!audio;
 
   // Comando /id funciona para qualquer um (útil para montar a lista de permitidos)
   if (text.startsWith("/id")) {
@@ -82,12 +85,34 @@ async function handleUpdate(update, env) {
     return send(
       env,
       chatId,
-      "Mande qualquer pergunta ou pedido: textos, ideias, cálculos, resumos, código...\n\nEu lembro das últimas mensagens da conversa. Use /novo quando quiser mudar de assunto."
+      "Mande qualquer pergunta ou pedido: textos, ideias, cálculos, resumos, código...\n\n🎤 Pode mandar áudio também! Segure o microfone e fale.\n\nEu lembro das últimas mensagens da conversa. Use /novo quando quiser mudar de assunto.\n/voz — liga/desliga minhas respostas em áudio"
     );
   }
   if (text.startsWith("/novo") || text.startsWith("/reset")) {
     await env.HISTORY.delete(historyKey(chatId));
     return send(env, chatId, "🧹 Conversa limpa. Pode começar um assunto novo!");
+  }
+  if (text.startsWith("/voz")) {
+    if (!env.OPENAI_API_KEY) {
+      return send(env, chatId, "🔇 Resposta em áudio não está configurada (falta o segredo OPENAI_API_KEY). Mas pode mandar áudio que eu entendo e respondo por texto!");
+    }
+    const off = (await env.HISTORY.get(voiceKey(chatId))) === "off";
+    await env.HISTORY.put(voiceKey(chatId), off ? "on" : "off");
+    return send(env, chatId, off ? "🔊 Respostas em áudio LIGADAS (quando você mandar áudio)." : "🔇 Respostas em áudio DESLIGADAS. Vou responder só por texto.");
+  }
+
+  // Áudio → texto
+  if (isVoice) {
+    await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+    try {
+      text = await transcribe(env, audio.file_id);
+    } catch (e) {
+      console.error(e);
+      return send(env, chatId, "⚠️ Não consegui entender o áudio. Tente de novo ou mande por texto.");
+    }
+    if (!text) return send(env, chatId, "🤔 Não ouvi nada no áudio. Pode repetir?");
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `🎤 _${text}_`, parse_mode: "Markdown" })
+      .then((r) => (r.ok ? r : telegram(env, "sendMessage", { chat_id: chatId, text: `🎤 ${text}` })));
   }
 
   // Mostra "digitando..." enquanto a IA pensa
@@ -98,7 +123,7 @@ async function handleUpdate(update, env) {
 
   let reply;
   try {
-    reply = await askAI(env, history);
+    reply = await askAI(env, history, isVoice);
   } catch (e) {
     console.error(e);
     return send(env, chatId, "⚠️ Não consegui responder agora. Tente de novo em instantes.");
@@ -106,13 +131,30 @@ async function handleUpdate(update, env) {
 
   history.push({ role: "assistant", content: reply });
   await saveHistory(env, chatId, history);
+
+  // Texto → áudio (se você falou por áudio e a voz estiver configurada)
+  const voiceOn = env.OPENAI_API_KEY && (await env.HISTORY.get(voiceKey(chatId))) !== "off";
+  if (isVoice && voiceOn) {
+    try {
+      await telegram(env, "sendChatAction", { chat_id: chatId, action: "record_voice" });
+      const ogg = await speak(env, reply);
+      await sendVoice(env, chatId, ogg);
+    } catch (e) {
+      console.error("Erro na voz:", e);
+    }
+  }
   await send(env, chatId, reply);
 }
 
 /* ---------------------------- IA ---------------------------- */
 
-async function askAI(env, messages) {
-  const system = env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+async function askAI(env, messages, isVoice = false) {
+  let system = env.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  if (isVoice) {
+    system +=
+      " A mensagem do usuário veio de um áudio transcrito. Responda de forma curta e natural, como numa conversa falada, " +
+      "sem markdown, sem listas longas e sem emojis.";
+  }
   const provider = (env.AI_PROVIDER || "workers-ai").toLowerCase();
 
   if (provider === "anthropic") {
@@ -143,9 +185,71 @@ async function askAI(env, messages) {
   return (result.response || "").trim() || "Não consegui gerar uma resposta.";
 }
 
+/* ---------------------------- Voz ---------------------------- */
+
+// Áudio do Telegram → texto (Whisper, grátis no Workers AI)
+async function transcribe(env, fileId) {
+  const info = await telegram(env, "getFile", { file_id: fileId });
+  if (!info.ok) throw new Error("getFile falhou: " + JSON.stringify(info));
+  const res = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${info.result.file_path}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+
+  try {
+    const out = await env.AI.run("@cf/openai/whisper-large-v3-turbo", {
+      audio: toBase64(bytes),
+      language: "pt",
+    });
+    return (out.text || "").trim();
+  } catch (e) {
+    console.error("whisper-large-v3-turbo falhou, tentando whisper:", e);
+    const out = await env.AI.run("@cf/openai/whisper", { audio: [...bytes] });
+    return (out.text || "").trim();
+  }
+}
+
+// Texto → áudio OGG/Opus (formato de mensagem de voz do Telegram)
+async function speak(env, text) {
+  const clean = text
+    .replace(/```[\s\S]*?```/g, " (código enviado por texto) ")
+    .replace(/[*_#`>|~]/g, "")
+    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+    .slice(0, 3500);
+  const res = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+      voice: env.OPENAI_TTS_VOICE || "nova",
+      input: clean,
+      response_format: "opus",
+      instructions: "Fale em português do Brasil, com tom natural e simpático.",
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI TTS ${res.status}: ${await res.text()}`);
+  return await res.arrayBuffer();
+}
+
+async function sendVoice(env, chatId, oggBuffer) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("voice", new Blob([oggBuffer], { type: "audio/ogg" }), "resposta.ogg");
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
+  const data = await res.json();
+  if (!data.ok) throw new Error("sendVoice falhou: " + JSON.stringify(data));
+}
+
+function toBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
 /* ------------------------ Histórico (KV) ------------------------ */
 
 const historyKey = (chatId) => `chat:${chatId}`;
+const voiceKey = (chatId) => `voz:${chatId}`;
 
 async function loadHistory(env, chatId) {
   const saved = await env.HISTORY.get(historyKey(chatId), "json");

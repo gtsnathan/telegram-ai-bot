@@ -20,9 +20,22 @@ export default {
     const url = new URL(request.url);
 
     // Registro do webhook: abra https://SEU-WORKER/setup?key=SEU_WEBHOOK_SECRET
-    if (request.method === "GET" && url.pathname === "/setup") {
+       if (request.method === "GET" && url.pathname === "/setup") {
+      const missing = ["TELEGRAM_BOT_TOKEN", "WEBHOOK_SECRET"].filter((k) => !env[k]);
+      if (missing.length) {
+        return new Response(
+          "❌ O bot NÃO está enxergando estes segredos: " + missing.join(", ") +
+            "\n\nEles precisam estar em: Settings → Variables and Secrets (a seção do TOPO, onde aparece AI_PROVIDER)." +
+            "\nNÃO na seção de Builds (a que tem 'Deploy Hooks' embaixo).",
+          { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } }
+        );
+      }
       if (url.searchParams.get("key") !== env.WEBHOOK_SECRET) {
-        return new Response("Não autorizado", { status: 401 });
+        return new Response(
+          "❌ Os segredos estão no lugar certo, mas a senha da URL (key=...) é diferente do WEBHOOK_SECRET cadastrado." +
+            "\nVerifique se não tem espaço antes/depois, ou cadastre o WEBHOOK_SECRET de novo.",
+          { status: 401, headers: { "content-type": "text/plain; charset=utf-8" } }
+        );
       }
       const res = await telegram(env, "setWebhook", {
         url: `${url.origin}/webhook`,

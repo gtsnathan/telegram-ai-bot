@@ -9,7 +9,7 @@ binding = "AI"
 # Memória das conversas — crie com: npx wrangler kv namespace create HISTORY
 [[kv_namespaces]]
 binding = "HISTORY"
-id = "9087545854:AAGQG25DVk4YF0yBuLj3s34wba3vrU-Us"
+id = "2e22e93ae45245909e5c4c86395f22c7"
 
 [vars]
 # "workers-ai" (grátis) ou "anthropic" (Claude, pago por uso)
